@@ -1,3 +1,7 @@
 wrappers:
   - job-log-logger:
+<<<<<<< HEAD
       suppress-empty: true
+=======
+      suppress-empty: false
+>>>>>>> master

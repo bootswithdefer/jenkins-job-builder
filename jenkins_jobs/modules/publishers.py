@@ -29,8 +29,10 @@ the build is complete.
 import xml.etree.ElementTree as XML
 import jenkins_jobs.modules.base
 from jenkins_jobs.modules import hudson_model
+from jenkins_jobs.modules.helpers import build_trends_publisher
 from jenkins_jobs.errors import JenkinsJobsException
 import logging
+import pkg_resources
 import sys
 import random
 
@@ -1159,6 +1161,29 @@ def scp(parser, xml_parent, data):
     """yaml: scp
     Upload files via SCP
     Requires the Jenkins :jenkins-wiki:`SCP Plugin <SCP+plugin>`.
+
+    When writing a publisher macro, it is important to keep in mind that
+    Jenkins uses Ant's `SCP Task
+    <https://ant.apache.org/manual/Tasks/scp.html>`_ via the Jenkins `SCP
+    Plugin <https://wiki.jenkins-ci.org/display/JENKINS/SCP+plugin>`_ which
+    relies on `FileSet <https://ant.apache.org/manual/Types/fileset.html>`_
+    and `DirSet <https://ant.apache.org/manual/Types/dirset.html>`_ patterns.
+    The relevant piece of documentation is excerpted below:
+
+        Source points to files which will be uploaded. You can use ant
+        includes syntax, eg. ``folder/dist/*.jar``. Path is constructed from
+        workspace root. Note that you cannot point files outside the workspace
+        directory.  For example providing: ``../myfile.txt`` won't work...
+        Destination points to destination folder on remote site. It will be
+        created if doesn't exists and relative to root repository path. You
+        can define multiple blocks of source/destination pairs.
+
+    This means that absolute paths, e.g., ``/var/log/**`` will not work and
+    will fail to compile. All paths need to be relative to the directory that
+    the publisher runs and the paths have to be contained inside of that
+    directory. The relative working directory is usually::
+
+        /home/jenkins/workspace/${JOB_NAME}
 
     :arg str site: name of the scp site
     :arg str target: destination directory
@@ -2740,7 +2765,7 @@ def warnings(parser, xml_parent, data):
               - CodeAnalysis
             workspace-file-scanners:
               - file-pattern: '**/*.out'
-                scanner: 'AcuCobol Compiler
+                scanner: 'AcuCobol Compiler'
               - file-pattern: '**/*.warnings'
                 scanner: FxCop
             files-to-include: '[a-zA-Z]\.java,[a-zA-Z]\.cpp'
@@ -3303,42 +3328,37 @@ def build_publisher(parser, xml_parent, data):
     Requires the Jenkins :jenkins-wiki:`Build Publisher Plugin
     <Build+Publisher+Plugin>`.
 
-    :arg str servers: Specify the servers where to publish
+    :arg bool publish-unstable-builds: publish unstable builds (default: true)
+    :arg bool publish-failed-builds: publish failed builds (default: true)
+    :arg int days-to-keep: days to keep when publishing results (optional)
+    :arg int num-to-keep: number of jobs to keep in the published results
+      (optional)
 
+    Example:
 
-    Example::
-
-        publishers:
-            - build-publisher:
-                name: servername
-                publish-unstable-builds: true
-                publish-failed-builds: true
-                days-to-keep: -1
-                num-to-keep: -1
-                artifact-days-to-keep: -1
-                artifact-num-to-keep: -1
-
+    .. literalinclude::
+       /../../tests/publishers/fixtures/build-publisher002.yaml
     """
 
     reporter = XML.SubElement(
         xml_parent,
         'hudson.plugins.build__publisher.BuildPublisher')
 
-    XML.SubElement(reporter, 'serverName').text = data['name']
     XML.SubElement(reporter, 'publishUnstableBuilds').text = \
         str(data.get('publish-unstable-builds', True)).lower()
     XML.SubElement(reporter, 'publishFailedBuilds').text = \
         str(data.get('publish-failed-builds', True)).lower()
 
-    logrotator = XML.SubElement(reporter, 'logRotator')
-    XML.SubElement(logrotator, 'daysToKeep').text = \
-        str(data.get('days-to-keep', -1))
-    XML.SubElement(logrotator, 'numToKeep').text = \
-        str(data.get('num-to-keep', -1))
-    XML.SubElement(logrotator, 'artifactDaysToKeep').text = \
-        str(data.get('artifact-days-to-keep', -1))
-    XML.SubElement(logrotator, 'artifactNumToKeep').text = \
-        str(data.get('artifact-num-to-keep', -1))
+    if 'days-to-keep' in data or 'num-to-keep' in data:
+        logrotator = XML.SubElement(reporter, 'logRotator')
+        XML.SubElement(logrotator, 'daysToKeep').text = \
+            str(data.get('days-to-keep', -1))
+        XML.SubElement(logrotator, 'numToKeep').text = \
+            str(data.get('num-to-keep', -1))
+        # hardcoded to -1 to emulate what the build publisher
+        # plugin seem to do.
+        XML.SubElement(logrotator, 'artifactDaysToKeep').text = "-1"
+        XML.SubElement(logrotator, 'artifactNumToKeep').text = "-1"
 
 
 def stash(parser, xml_parent, data):
@@ -3764,72 +3784,6 @@ def valgrind(parser, xml_parent, data):
         data.get('publish-if-failed', False)).lower()
 
 
-def build_trends_publisher(plugin_name, xml_element, data):
-    """Helper to create various trend publishers.
-    """
-
-    def append_thresholds(element, data, only_totals):
-        """Appends the status thresholds.
-        """
-
-        for status in ['unstable', 'failed']:
-            status_data = data.get(status, {})
-
-            limits = [
-                ('total-all', 'TotalAll'),
-                ('total-high', 'TotalHigh'),
-                ('total-normal', 'TotalNormal'),
-                ('total-low', 'TotalLow')]
-
-            if only_totals is False:
-                limits.extend([
-                    ('new-all', 'NewAll'),
-                    ('new-high', 'NewHigh'),
-                    ('new-normal', 'NewNormal'),
-                    ('new-low', 'NewLow')])
-
-            for key, tag_suffix in limits:
-                tag_name = status + tag_suffix
-                XML.SubElement(element, tag_name).text = str(
-                    status_data.get(key, ''))
-
-    # Tuples containing: setting name, tag name, default value
-    settings = [
-        ('healthy', 'healthy', ''),
-        ('unhealthy', 'unHealthy', ''),
-        ('health-threshold', 'thresholdLimit', 'low'),
-        ('plugin-name', 'pluginName', plugin_name),
-        ('default-encoding', 'defaultEncoding', ''),
-        ('can-run-on-failed', 'canRunOnFailed', False),
-        ('use-stable-build-as-reference', 'useStableBuildAsReference', False),
-        ('use-delta-values', 'useDeltaValues', False),
-        ('thresholds', 'thresholds', {}),
-        ('should-detect-modules', 'shouldDetectModules', False),
-        ('dont-compute-new', 'dontComputeNew', True),
-        ('do-not-resolve-relative-paths', 'doNotResolveRelativePaths', False),
-        ('pattern', 'pattern', '')]
-
-    thresholds = ['low', 'normal', 'high']
-
-    for key, tag_name, default in settings:
-        xml_config = XML.SubElement(xml_element, tag_name)
-        config_value = data.get(key, default)
-
-        if key == 'thresholds':
-            append_thresholds(
-                xml_config,
-                config_value,
-                data.get('dont-compute-new', True))
-        elif key == 'health-threshold' and config_value not in thresholds:
-            raise JenkinsJobsException("health-threshold must be one of %s" %
-                                       ", ".join(thresholds))
-        else:
-            if isinstance(default, bool):
-                xml_config.text = str(config_value).lower()
-            else:
-                xml_config.text = str(config_value)
-
-
 def pmd(parser, xml_parent, data):
     """yaml: pmd
     Publish trend reports with PMD.
@@ -4096,11 +4050,16 @@ def conditional_publisher(parser, xml_parent, data):
     /../../tests/publishers/fixtures/conditional-publisher001.yaml
        :language: yaml
 
-    Multiple Conditional Actions Example:
+    Multiple Conditional Actions Example
+    (includes example of multiple actions per condition which requires
+    v0.13 or higher of the Flexible Publish plugin):
 
     .. literalinclude:: \
-    /../../tests/publishers/fixtures/conditional-publisher002.yaml
+    /../../tests/publishers/fixtures/conditional-publisher003.yaml
        :language: yaml
+
+    :download:`Multiple Conditional Actions Example for pre-v0.13 versions
+    <../../tests/publishers/fixtures/conditional-publisher002.yaml>`
 
     """
     def publish_condition(cdata):
@@ -4177,8 +4136,9 @@ def conditional_publisher(parser, xml_parent, data):
 
     def publish_action(parent, action):
         for edited_node in create_publishers(parser, action):
-            edited_node.set('class', edited_node.tag)
-            edited_node.tag = 'publisher'
+            if not use_publisher_list:
+                edited_node.set('class', edited_node.tag)
+                edited_node.tag = 'publisher'
             parent.append(edited_node)
 
     flex_publisher_tag = 'org.jenkins__ci.plugins.flexible__publish.'    \
@@ -4217,14 +4177,27 @@ def conditional_publisher(parser, xml_parent, data):
         if 'action' in cond_action:
             actions = cond_action['action']
 
-            # Flexible Publish will overwrite action if more than one is
-            # specified.  Limit the action list to one element.
-            if len(actions) is not 1:
+            action_parent = cond_publisher
+
+            plugin_info = \
+                parser.registry.get_plugin_info("Flexible Publish Plugin")
+            version = pkg_resources.parse_version(plugin_info.get('version',
+                                                                  '0'))
+            # XML tag changed from publisher to publisherList in v0.13
+            # check the plugin version to determine further operations
+            use_publisher_list = version >= pkg_resources.parse_version("0.13")
+
+            if use_publisher_list:
+                action_parent = XML.SubElement(cond_publisher, 'publisherList')
+            else:
+                # Check the length of actions list for versions prior to 0.13.
+                # Flexible Publish will overwrite action if more than one is
+                # specified.  Limit the action list to one element.
+                if len(actions) is not 1:
                     raise JenkinsJobsException("Only one action may be "
                                                "specified for each condition.")
-
             for action in actions:
-                publish_action(cond_publisher, action)
+                publish_action(action_parent, action)
         else:
             raise JenkinsJobsException('action must be set for each condition')
 
